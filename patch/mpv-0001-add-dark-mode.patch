@@ -1,0 +1,122 @@
+From 9e8ca8de9e5bf49f713125abc2a877a25049c286 Mon Sep 17 00:00:00 2001
+From: Sneakpeakcss <77424331+Sneakpeakcss@users.noreply.github.com>
+Date: Sun, 22 Jun 2025 01:43:36 +0200
+Subject: [PATCH] Add dark-mode option
+
+---
+ options/options.c      |  2 ++
+ options/options.h      |  1 +
+ video/out/w32_common.c | 30 +++++++++++++++++++++++++++---
+ 3 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/options/options.c b/options/options.c
+index f25d435950..40c989c907 100644
+--- a/options/options.c
++++ b/options/options.c
+@@ -119,6 +119,7 @@ static const struct m_sub_options screenshot_conf = {
+ static const m_option_t mp_vo_opt_list[] = {
+     {"vo", OPT_SETTINGSLIST(video_driver_list, &vo_obj_list), .flags = UPDATE_VO},
+     {"taskbar-progress", OPT_BOOL(taskbar_progress)},
++    {"dark-mode", OPT_CHOICE(dark_mode, {"auto", 1}, {"always", 2}, {"never", 3})},
+     {"drag-and-drop", OPT_CHOICE(drag_and_drop, {"no", -2}, {"auto", -1},
+         {"replace", DND_REPLACE},
+         {"append", DND_APPEND},
+@@ -253,6 +254,7 @@ const struct m_sub_options vo_sub_opts = {
+     .size = sizeof(struct mp_vo_opts),
+     .defaults = &(const struct mp_vo_opts){
+         .video_driver_list = NULL,
++        .dark_mode = 1,
+         .drag_and_drop = -1,
+         .monitor_pixel_aspect = 1.0,
+         .screen_id = -1,
+diff --git a/options/options.h b/options/options.h
+index 6f16f50c25..e328038bab 100644
+--- a/options/options.h
++++ b/options/options.h
+@@ -10,6 +10,7 @@ typedef struct mp_vo_opts {
+     struct m_obj_settings *video_driver_list;
+ 
+     bool taskbar_progress;
++    int dark_mode;
+     bool snap_window;
+     int drag_and_drop;
+     bool ontop;
+diff --git a/video/out/w32_common.c b/video/out/w32_common.c
+index 26dd2c36f7..b25fde40dc 100644
+--- a/video/out/w32_common.c
++++ b/video/out/w32_common.c
+@@ -80,6 +80,7 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+ struct w32_api {
+     BOOLEAN (WINAPI *pShouldAppsUseDarkMode)(void);
+     DWORD (WINAPI *pSetPreferredAppMode)(DWORD mode);
++    void (WINAPI *pFlushMenuThemes)(void);
+ };
+ 
+ struct vo_w32_state {
+@@ -1276,6 +1277,19 @@ static void reinit_window_state(struct vo_w32_state *w32)
+     update_window_state(w32);
+ }
+ 
++// Forces title bar update after changing dark-mode at runtime.
++static void update_titlebar(const struct vo_w32_state *w32)
++{
++    // Windows 11 doesn't need this.
++    if (check_windows10_build(22000))
++        return;
++
++    BOOL is_active = (w32->window == GetForegroundWindow());
++
++    SendMessage(w32->window, WM_NCACTIVATE, !is_active, 0);
++    SendMessage(w32->window, WM_NCACTIVATE, is_active, 0);
++}
++
+ // Follow Windows settings and update dark mode state
+ // Microsoft documented how to enable dark mode for title bar:
+ // https://learn.microsoft.com/windows/apps/desktop/modernize/apply-windows-themes
+@@ -1290,16 +1304,21 @@ static void reinit_window_state(struct vo_w32_state *w32)
+ static void update_dark_mode(const struct vo_w32_state *w32)
+ {
+     if (w32->api.pSetPreferredAppMode)
+-        w32->api.pSetPreferredAppMode(1); // allow dark mode
++        w32->api.pSetPreferredAppMode(w32->opts->dark_mode); // 1=allow dark mode(default), 2=force dark, 3=force light
+ 
+     // if pShouldAppsUseDarkMode is not available, just assume it to be true
+-    const BOOL use_dark_mode = !is_high_contrast() && (!w32->api.pShouldAppsUseDarkMode ||
+-                                                       w32->api.pShouldAppsUseDarkMode());
++    BOOL use_dark_mode = (w32->opts->dark_mode == 2) ? TRUE :
++                         (w32->opts->dark_mode == 1 &&
++                          !is_high_contrast() && (!w32->api.pShouldAppsUseDarkMode ||
++                                                  w32->api.pShouldAppsUseDarkMode()));
+ 
+     SetWindowTheme(w32->window, use_dark_mode ? L"DarkMode_Explorer" : L"", NULL);
+ 
+     DwmSetWindowAttribute(w32->window, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                           &use_dark_mode, sizeof(use_dark_mode));
++                          
++    if (w32->api.pFlushMenuThemes)
++        w32->api.pFlushMenuThemes(); // update context menu theme at runtime
+ }
+ 
+ static void update_backdrop(const struct vo_w32_state *w32)
+@@ -2023,6 +2042,8 @@ static void w32_api_load(struct vo_w32_state *w32)
+                 (void *)GetProcAddress(uxtheme_dll, MAKEINTRESOURCEA(132));
+     w32->api.pSetPreferredAppMode = !uxtheme_dll ? NULL :
+                 (void *)GetProcAddress(uxtheme_dll, MAKEINTRESOURCEA(135));
++    w32->api.pFlushMenuThemes = !uxtheme_dll ? NULL :
++                (void *)GetProcAddress(uxtheme_dll, MAKEINTRESOURCEA(136));
+ }
+ 
+ static MP_THREAD_VOID gui_thread(void *ptr)
+@@ -2298,6 +2319,9 @@ static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
+                 update_window_style(w32);
+                 ShowWindow(w32->window, SW_SHOW);
+                 update_window_state(w32);
++            } else if (changed_option == &vo_opts->dark_mode) {
++                update_dark_mode(w32);
++                update_titlebar(w32);
+             } else if (changed_option == &vo_opts->window_minimized) {
+                 update_minimized_state(w32);
+             } else if (changed_option == &vo_opts->window_maximized) {
+-- 
+2.39.2.windows.1
+
