@@ -1,0 +1,121 @@
+From 0eb2557744060157ea0367928d6d867c3e207aed Mon Sep 17 00:00:00 2001
+From: Sneakpeakcss <77424331+Sneakpeakcss@users.noreply.github.com>
+Date: Sun, 6 Jul 2025 12:10:07 +0200
+Subject: [PATCH] Add --dark-mode option
+
+---
+ options/options.c      |  9 +++++++++
+ options/options.h      |  1 +
+ video/out/w32_common.c | 30 +++++++++++++++++++++++++++---
+ 3 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/options/options.c b/options/options.c
+index f5a0967c85..f7cff822c0 100644
+--- a/options/options.c
++++ b/options/options.c
+@@ -229,6 +229,14 @@ static const m_option_t mp_vo_opt_list[] = {
+ #define DWMSBT_TRANSIENTWINDOW 3
+ #define DWMSBT_TABBEDWINDOW 4
+ 
++#define APPMODE_ALLOWDARK 1
++#define APPMODE_FORCEDARK 2
++#define APPMODE_FORCELIGHT 3
++
++    {"dark-mode", OPT_CHOICE(dark_mode,
++        {"auto", APPMODE_ALLOWDARK},
++        {"always", APPMODE_FORCEDARK},
++        {"never", APPMODE_FORCELIGHT})},
+     {"backdrop-type", OPT_CHOICE(backdrop_type, {"auto", DWMSBT_AUTO}, {"none", DWMSBT_NONE},
+         {"mica", DWMSBT_MAINWINDOW}, {"acrylic", DWMSBT_TRANSIENTWINDOW}, {"mica-alt", DWMSBT_TABBEDWINDOW})},
+     {"window-affinity", OPT_CHOICE(window_affinity, {"default", WDA_NONE},
+@@ -284,6 +292,7 @@ const struct m_sub_options vo_sub_opts = {
+         .timing_offset = 0.050,
+         .swapchain_depth = 3,
+         .focus_on = 1,
++        .dark_mode = 1,
+     },
+ };
+ 
+diff --git a/options/options.h b/options/options.h
+index 6f16f50c25..7c6a0ca57f 100644
+--- a/options/options.h
++++ b/options/options.h
+@@ -75,6 +75,7 @@ typedef struct mp_vo_opts {
+     bool force_render;
+     bool force_window_position;
+ 
++    int dark_mode;
+     int backdrop_type;
+     int window_affinity;
+     char *mmcss_profile;
+diff --git a/video/out/w32_common.c b/video/out/w32_common.c
+index 26dd2c36f7..6b60f7924e 100644
+--- a/video/out/w32_common.c
++++ b/video/out/w32_common.c
+@@ -80,6 +80,7 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+ struct w32_api {
+     BOOLEAN (WINAPI *pShouldAppsUseDarkMode)(void);
+     DWORD (WINAPI *pSetPreferredAppMode)(DWORD mode);
++    VOID (WINAPI *pFlushMenuThemes)(void);
+ };
+ 
+ struct vo_w32_state {
+@@ -1290,16 +1291,34 @@ static void reinit_window_state(struct vo_w32_state *w32)
+ static void update_dark_mode(const struct vo_w32_state *w32)
+ {
+     if (w32->api.pSetPreferredAppMode)
+-        w32->api.pSetPreferredAppMode(1); // allow dark mode
++        w32->api.pSetPreferredAppMode(w32->opts->dark_mode);
+ 
+     // if pShouldAppsUseDarkMode is not available, just assume it to be true
+-    const BOOL use_dark_mode = !is_high_contrast() && (!w32->api.pShouldAppsUseDarkMode ||
+-                                                       w32->api.pShouldAppsUseDarkMode());
++    BOOL use_dark_mode = (w32->opts->dark_mode == 2) ? TRUE :  // 2=ForceDark
++                         (w32->opts->dark_mode == 1 &&  // 1=AllowDark
++                          !is_high_contrast() && (!w32->api.pShouldAppsUseDarkMode ||
++                                                  w32->api.pShouldAppsUseDarkMode()));
+ 
+     SetWindowTheme(w32->window, use_dark_mode ? L"DarkMode_Explorer" : L"", NULL);
+ 
+     DwmSetWindowAttribute(w32->window, DWMWA_USE_IMMERSIVE_DARK_MODE,
+                           &use_dark_mode, sizeof(use_dark_mode));
++
++    // refresh context menu
++    if (w32->api.pFlushMenuThemes)
++        w32->api.pFlushMenuThemes();
++}
++
++// Repaint title bar after changing --dark-mode, required on Windows 10
++static void update_titlebar(const struct vo_w32_state *w32)
++{
++    if (w32->parent || check_windows10_build(22000))
++        return;
++
++    BOOL is_active = (w32->window == GetForegroundWindow());
++
++    SendMessage(w32->window, WM_NCACTIVATE, !is_active, 0);
++    SendMessage(w32->window, WM_NCACTIVATE, is_active, 0);
+ }
+ 
+ static void update_backdrop(const struct vo_w32_state *w32)
+@@ -2023,6 +2042,8 @@ static void w32_api_load(struct vo_w32_state *w32)
+                 (void *)GetProcAddress(uxtheme_dll, MAKEINTRESOURCEA(132));
+     w32->api.pSetPreferredAppMode = !uxtheme_dll ? NULL :
+                 (void *)GetProcAddress(uxtheme_dll, MAKEINTRESOURCEA(135));
++    w32->api.pFlushMenuThemes = !uxtheme_dll ? NULL :
++                (void *)GetProcAddress(uxtheme_dll, MAKEINTRESOURCEA(136));
+ }
+ 
+ static MP_THREAD_VOID gui_thread(void *ptr)
+@@ -2298,6 +2319,9 @@ static int gui_thread_control(struct vo_w32_state *w32, int request, void *arg)
+                 update_window_style(w32);
+                 ShowWindow(w32->window, SW_SHOW);
+                 update_window_state(w32);
++            } else if (changed_option == &vo_opts->dark_mode) {
++                update_dark_mode(w32);
++                update_titlebar(w32);
+             } else if (changed_option == &vo_opts->window_minimized) {
+                 update_minimized_state(w32);
+             } else if (changed_option == &vo_opts->window_maximized) {
+-- 
+2.39.2.windows.1
