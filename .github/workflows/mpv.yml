@@ -383,10 +383,18 @@ jobs:
         run: |
           chmod +x build.sh
           cd mpv-winbuild-cmake
-          if [[ "$(ls -A ../patch/*.patch)" ]]; then
-            for patch in ../patch/*.patch ; do
+          if [[ "$(ls -A ../patch/[0-9]*.patch)" ]]; then
+            for patch in ../patch/[0-9]*.patch ; do
               git am --3way "$patch" || git am --abort
             done
+          fi
+          cp ../patch/[a-z]*.patch packages/ || true
+          if [[ "$(ls -A ../patch/mpv-*.patch)" ]]; then
+            if [[ "$(ls -A ../patch_pr/0000-*.patch)" ]]; then
+              for patch in ../patch_pr/0000-*.patch ; do
+                git am --3way "$patch" || git am --abort
+              done
+            fi
           fi
           if [ "${{ matrix.lgpl }}" = "true" ]; then
             git am --3way ../compile-lgpl-libmpv.patch
